@@ -1,0 +1,242 @@
+services:
+  postgres:
+    image: ghcr.io/${GITHUB_REPOSITORY}/postgres:latest
+    container_name: appraisal_postgres_prod
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+    networks:
+      - appraisal_network
+
+  redis:
+    image: ghcr.io/${GITHUB_REPOSITORY}/redis:latest
+    container_name: appraisal_redis_prod
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+    networks:
+      - appraisal_network
+
+  backend:
+    image: ghcr.io/${GITHUB_REPOSITORY}/backend:${TAG:-latest}
+    container_name: appraisal_backend_prod
+    environment:
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      SECRET_KEY: ${SECRET_KEY}
+      DEBUG: "False"
+      ALLOWED_ORIGINS: https://appraisal.company.com
+      USE_AI_MODEL: ${USE_AI_MODEL:-False}
+      ML_MODEL_PATH: /app/models/pricing_model.h5
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_logs:/app/logs
+      - model_data:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+        reservations:
+          memory: 512M
+    networks:
+      - appraisal_network
+
+  frontend:
+    image: ghcr.io/${GITHUB_REPOSITORY}/frontend:${TAG:-latest}
+    container_name: appraisal_frontend_prod
+    environment:
+      REACT_APP_API_URL: https://api.appraisal.company.com
+      REACT_APP_WS_URL: wss://api.appraisal.company.com/ws
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    networks:
+      - appraisal_network
+
+  nginx:
+    image: ghcr.io/${GITHUB_REPOSITORY}/nginx:${TAG:-latest}
+    container_name: appraisal_nginx_prod
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    networks:
+      - appraisal_network
+
+  # Monitoring stack
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: appraisal_prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - appraisal_network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: appraisal_grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/datasources
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - appraisal_network
+
+  # Backup service
+  backup:
+    image: postgres:15-alpine
+    container_name: appraisal_backup
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - ./backup:/backup
+    entrypoint: |
+      sh -c "
+      while true; do
+        pg_dump -h postgres -U \$${DB_USER} \$${DB_NAME} > /backup/appraisal_\$(date +%Y%m%d_%H%M%S).sql
+        find /backup -name '*.sql' -mtime +7 -delete
+        sleep 86400
+      done
+      "
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    networks:
+      - appraisal_network
+
+volumes:
+  postgres_data:
+  redis_data:
+  backend_logs:
+  nginx_logs:
+  model_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  appraisal_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

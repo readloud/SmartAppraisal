@@ -1,0 +1,210 @@
+# monitoring/prometheus/alerts.yml
+# Alert rules for SmartAppraisal
+
+groups:
+  # ==================== SERVICE AVAILABILITY ====================
+  - name: service_alerts
+    interval: 30s
+    rules:
+      - alert: BackendDown
+        expr: up{job="backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: backend
+        annotations:
+          summary: "Backend service is down"
+          description: "Backend API has been down for more than 1 minute"
+          action: "Check backend logs and restart if needed"
+
+      - alert: FrontendDown
+        expr: probe_success{job="blackbox"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: frontend
+        annotations:
+          summary: "Frontend application is down"
+          description: "Frontend has been unreachable for more than 1 minute"
+          action: "Check frontend container and nginx"
+
+      - alert: DatabaseDown
+        expr: pg_up{job="postgresql"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "PostgreSQL database is down"
+          description: "Database has been unavailable for more than 1 minute"
+          action: "Check database container and logs"
+
+      - alert: RedisDown
+        expr: redis_up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: redis
+        annotations:
+          summary: "Redis cache is down"
+          description: "Redis has been unavailable for more than 1 minute"
+          action: "Check redis container and logs"
+
+  # ==================== PERFORMANCE ALERTS ====================
+  - name: performance_alerts
+    interval: 30s
+    rules:
+      - alert: HighResponseTime
+        expr: rate(api_request_duration_seconds_sum[5m]) / rate(api_request_duration_seconds_count[5m]) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: "High API response time"
+          description: "Average response time is {{ $value }}s, exceeding 2s threshold"
+          action: "Check database queries and optimize slow endpoints"
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          service: backend
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }}, exceeding 5% threshold"
+          action: "Check application logs for exceptions"
+
+      - alert: SlowDatabaseQueries
+        expr: rate(pg_stat_database_tup_returned[5m]) > 10000
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "High database load"
+          description: "Database is processing {{ $value }} rows per second"
+          action: "Check for missing indexes or inefficient queries"
+
+  # ==================== RESOURCE ALERTS ====================
+  - name: resource_alerts
+    interval: 1m
+    rules:
+      - alert: HighCPUUsage
+        expr: 100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value }}% on {{ $labels.instance }}"
+          action: "Consider scaling resources or investigating processes"
+
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value }}% on {{ $labels.instance }}"
+          action: "Check for memory leaks or consider increasing memory"
+
+      - alert: LowDiskSpace
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 15
+        for: 5m
+        labels:
+          severity: critical
+          service: infrastructure
+        annotations:
+          summary: "Low disk space"
+          description: "Disk is {{ $value }}% full on {{ $labels.instance }}"
+          action: "Clean up logs, backups, or expand storage"
+
+  # ==================== BUSINESS METRICS ====================
+  - name: business_alerts
+    interval: 5m
+    rules:
+      - alert: LowTransactionVolume
+        expr: rate(transactions_total[1h]) < 10
+        for: 1h
+        labels:
+          severity: warning
+          service: business
+        annotations:
+          summary: "Low transaction volume"
+          description: "Only {{ $value }} transactions per hour in the last hour"
+          action: "Check for system issues or market conditions"
+
+      - alert: LowConfidenceScore
+        expr: avg(appraisal_confidence_score) < 50
+        for: 30m
+        labels:
+          severity: warning
+          service: business
+        annotations:
+          summary: "Low average confidence score"
+          description: "Average confidence is {{ $value }}%, below 50% threshold"
+          action: "Check data quality or rule engine configuration"
+
+      - alert: DecreasingProfitMargin
+        expr: avg(transaction_profit_margin) < 10
+        for: 1h
+        labels:
+          severity: warning
+          service: business
+        annotations:
+          summary: "Decreasing profit margin"
+          description: "Average profit margin is {{ $value }}%, below 10% threshold"
+          action: "Review pricing strategy and cost structure"
+
+      - alert: HighInventoryAging
+        expr: avg(inventory_aging_days) > 30
+        for: 24h
+        labels:
+          severity: warning
+          service: business
+        annotations:
+          summary: "High inventory aging"
+          description: "Units are staying in inventory for {{ $value }} days on average"
+          action: "Review pricing strategy or promotional activities"
+
+  # ==================== SECURITY ALERTS ====================
+  - name: security_alerts
+    interval: 1m
+    rules:
+      - alert: FailedLoginAttempts
+        expr: increase(failed_logins_total[5m]) > 10
+        for: 1m
+        labels:
+          severity: warning
+          service: security
+        annotations:
+          summary: "Multiple failed login attempts"
+          description: "{{ $value }} failed logins in the last 5 minutes"
+          action: "Check for brute force attacks and block offending IPs"
+
+      - alert: UnusualAccessPattern
+        expr: increase(api_requests_total{endpoint="/api/admin/"}[15m]) > 100
+        for: 5m
+        labels:
+          severity: critical
+          service: security
+        annotations:
+          summary: "Unusual admin access pattern"
+          description: "{{ $value }} admin API requests in the last 15 minutes"
+          action: "Investigate potential unauthorized access"
+
+      - alert: RateLimitExceeded
+        expr: increase(rate_limit_exceeded_total[5m]) > 50
+        for: 1m
+        labels:
+          severity: warning
+          service: security
+        annotations:
+          summary: "Rate limit exceeded"
+          description: "{{ $value }} rate limit violations in the last 5 minutes"
+          action: "Check for abuse or misconfigured clients"

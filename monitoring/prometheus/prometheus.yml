@@ -1,0 +1,374 @@
+# monitoring/prometheus/prometheus.yml
+# Complete production-ready configuration
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+  
+  external_labels:
+    environment: ${ENVIRONMENT:-production}
+    project: smartappraisal
+    datacenter: ${DATACENTER:-jakarta}
+
+# Alerting
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+          labels:
+            group: alertmanager
+    - timeout: 10s
+    - api_version: v2
+
+# Rule files
+rule_files:
+  - "/etc/prometheus/alerts/*.yml"
+  - "/etc/prometheus/rules/*.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: prometheus
+          type: monitoring
+
+  # Backend API
+  - job_name: 'backend'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 8s
+    static_configs:
+      - targets: ['backend:8000']
+        labels:
+          service: backend
+          type: api
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'backend'
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'api_request_.*|transaction_.*|appraisal_.*'
+        action: keep
+
+  # PostgreSQL
+  - job_name: 'postgresql'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+        labels:
+          service: postgresql
+          type: database
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'pg_(stat|size|database)_.*'
+        action: keep
+
+  # Redis
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels:
+          service: redis
+          type: cache
+
+  # Nginx
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+        labels:
+          service: nginx
+          type: web_server
+
+  # Node Exporter (System)
+  - job_name: 'node'
+    static_configs:
+      - targets: 
+          - 'node-exporter:9100'
+        labels:
+          service: node
+          type: system
+
+  # Blackbox (Health probes)
+  - job_name: 'blackbox'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - https://appraisal.company.com/health
+          - https://api.appraisal.company.com/health
+        labels:
+          service: blackbox
+          type: health_check
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # cAdvisor (Container metrics)
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels:
+          service: cadvisor
+          type: container
+
+# Remote storage (if using Thanos or Cortex)
+remote_write:
+  - url: ${REMOTE_WRITE_URL}
+    basic_auth:
+      username: ${REMOTE_WRITE_USER}
+      password: ${REMOTE_WRITE_PASS}
+    queue_config:
+      capacity: 10000
+      max_shards: 100
+      min_shards: 1
+      max_samples_per_send: 1000
+      batch_send_deadline: 5s
+    write_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'up|api_.*|transaction_.*|appraisal_.*|pg_.*|node_.*'
+        action: keep
+```
+
+### `docker-compose.monitoring.yml`
+```yaml
+# docker-compose.monitoring.yml
+# Complete monitoring stack
+
+version: '3.8'
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: appraisal_prometheus
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - appraisal_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: appraisal_alertmanager
+    volumes:
+      - ./monitoring/alertmanager:/etc/alertmanager
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.external-url=http://localhost:9093'
+    ports:
+      - "9093:9093"
+    restart: unless-stopped
+    networks:
+      - appraisal_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: appraisal_grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_INSTALL_PLUGINS: grafana-piechart-panel,grafana-worldmap-panel
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_BASIC_ENABLED: "true"
+      GF_SERVER_ROOT_URL: https://grafana.appraisal.company.com
+      GF_SERVER_DOMAIN: grafana.appraisal.company.com
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: ${SMTP_HOST}
+      GF_SMTP_USER: ${SMTP_USER}
+      GF_SMTP_PASSWORD: ${SMTP_PASSWORD}
+      GF_SMTP_FROM_ADDRESS: ${SMTP_FROM}
+    volumes:
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/datasources
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    networks:
+      - appraisal_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: appraisal_node_exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)'
+    ports:
+      - "9100:9100"
+    restart: unless-stopped
+    networks:
+      - appraisal_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:latest
+    container_name: appraisal_postgres_exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}?sslmode=disable"
+    ports:
+      - "9187:9187"
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    networks:
+      - appraisal_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: appraisal_redis_exporter
+    environment:
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    ports:
+      - "9121:9121"
+    restart: unless-stopped
+    depends_on:
+      - redis
+    networks:
+      - appraisal_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: appraisal_cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - appraisal_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:latest
+    container_name: appraisal_blackbox_exporter
+    volumes:
+      - ./monitoring/blackbox:/etc/blackbox_exporter
+    ports:
+      - "9115:9115"
+    restart: unless-stopped
+    networks:
+      - appraisal_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  pushgateway:
+    image: prom/pushgateway:latest
+    container_name: appraisal_pushgateway
+    ports:
+      - "9091:9091"
+    restart: unless-stopped
+    networks:
+      - appraisal_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  loki:
+    image: grafana/loki:latest
+    container_name: appraisal_loki
+    volumes:
+      - ./monitoring/loki:/etc/loki
+      - loki_data:/loki
+    command: -config.file=/etc/loki/loki-config.yaml
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+    networks:
+      - appraisal_network
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: appraisal_promtail
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./monitoring/promtail:/etc/promtail
+    command: -config.file=/etc/promtail/promtail-config.yaml
+    restart: unless-stopped
+    depends_on:
+      - loki
+    networks:
+      - appraisal_network
+
+volumes:
+  prometheus_data:
+  alertmanager_data:
+  grafana_data:
+  loki_data:
+
+networks:
+  appraisal_network:
+    external: true

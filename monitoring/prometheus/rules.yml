@@ -1,0 +1,48 @@
+# monitoring/prometheus/rules.yml
+# Recording rules for common queries
+
+groups:
+  - name: application_metrics
+    interval: 30s
+    rules:
+      # API throughput
+      - record: api:request_rate:5m
+        expr: rate(api_requests_total[5m])
+        
+      - record: api:error_rate:5m
+        expr: rate(api_requests_total{status=~"5.."}[5m]) / rate(api_requests_total[5m])
+      
+      # Transaction metrics
+      - record: transaction:avg_price:1h
+        expr: avg(transaction_purchase_price)
+        
+      - record: transaction:avg_profit:1h
+        expr: avg(transaction_profit)
+      
+      - record: transaction:total_volume:1h
+        expr: sum(rate(transactions_total[1h]))
+      
+      # Appraisal metrics
+      - record: appraisal:avg_confidence:1h
+        expr: avg(appraisal_confidence_score)
+      
+      - record: appraisal:total_count:1h
+        expr: sum(rate(appraisals_total[1h]))
+      
+      # Business KPIs
+      - record: business:gross_profit:1h
+        expr: sum(transaction_profit)
+      
+      - record: business:margin_percentage:1h
+        expr: (sum(transaction_profit) / sum(transaction_purchase_price)) * 100
+      
+      # Database metrics
+      - record: database:connections_active
+        expr: pg_stat_database_numbackends
+      
+      - record: database:cache_hit_ratio
+        expr: pg_stat_database_blks_hit / (pg_stat_database_blks_read + pg_stat_database_blks_hit)
+      
+      # Cache metrics
+      - record: cache:hit_rate:5m
+        expr: sum(rate(redis_keyspace_hits_total[5m])) / (sum(rate(redis_keyspace_hits_total[5m])) + sum(rate(redis_keyspace_misses_total[5m])))
